@@ -247,7 +247,7 @@ def _verify_line(sec: str, term: str) -> bool:
 
 
 def validate_milestone(text: str, *, authoring: bool = False,
-                       baseline: str | None = None) -> list[str]:
+                       baseline: str | None = None, language: str | None = None) -> list[str]:
     """Return a list of format violations (empty list == conforms to the schema).
 
     ``authoring=True`` is the strict mode for freshly distilled milestones: the
@@ -269,6 +269,7 @@ def validate_milestone(text: str, *, authoring: bool = False,
     because the other fourteen are still unpriced, and would make every resume
     gate read a pre-rule milestone as "not distilled yet".
     """
+    native = language == "ppu"
     v: list[str] = []
     if not text.lstrip().startswith("# "):
         v.append("missing title header (# <op> milestone)")
@@ -341,7 +342,8 @@ def validate_milestone(text: str, *, authoring: bool = False,
         # machine vocabulary is exact words, and a near-miss ("pipeline",
         # "mbarrier_pipeline") must be named as such — not misreported as a
         # missing adjudication, and never silently accepted.
-        for kind, pat, vocab in (("SYNC", _SYNC_TAG, _SYNC_VOCAB),
+        sync_vocab = (*_SYNC_VOCAB, "native-pipeline", "native-barrier") if native else _SYNC_VOCAB
+        for kind, pat, vocab in (("SYNC", _SYNC_TAG, sync_vocab),
                                  ("GATHER", _GATHER_TAG, _GATHER_VOCAB),
                                  ("PHASE", _PHASE_TAG, _PHASE_VOCAB)):
             for val, _scope in _tag_scopes(sec3, pat):
@@ -356,6 +358,10 @@ def validate_milestone(text: str, *, authoring: bool = False,
                      "named-barrier / none) — the cross-role supply protocol must be "
                      "adjudicated explicitly (meta_milestone: sync-topology "
                      "verification line)")
+        elif native and any(t != "none" for t, _ in sync):
+            if not _native_verify_line(sec3, "sync"):
+                v.append("§3 PPU sync needs a sync: verification line using native "
+                         "ACU/ISA or a correctness probe; NVIDIA stall_barrier is not evidence")
         elif any(t != "none" for t, _ in sync) and not _verify_line(sec3, "stall_barrier"):
             v.append("§3 adjudicates a cross-role sync topology ([SYNC:] != none) but "
                      "no [VERIFY:] gate line anchors stall_barrier (a prose mention "
@@ -371,6 +377,10 @@ def validate_milestone(text: str, *, authoring: bool = False,
             v.append("§3 has no [GATHER:] feed adjudication (prefetched / serial / "
                      "none) — every data-dependent gmem feed must be adjudicated "
                      "explicitly (meta_milestone: indirect-feed verification line)")
+        elif native and any(t != "none" for t, _ in gather):
+            if not _native_verify_line(sec3, "gather"):
+                v.append("§3 PPU gather needs a gather: verification line using native "
+                         "ACU/ISA or a correctness probe; NVIDIA stall_long_sb is not evidence")
         elif any(t != "none" for t, _ in gather) and not _verify_line(sec3, "stall_long_sb"):
             v.append("§3 adjudicates an indirect gmem feed ([GATHER:] != none) but "
                      "no [VERIFY:] gate line anchors stall_long_sb (a prose mention "
@@ -455,6 +465,12 @@ def validate_milestone(text: str, *, authoring: bool = False,
     return v
 
 
+def _native_verify_line(sec: str, mechanism: str) -> bool:
+    return any(re.search(rf"\b{mechanism}\s*:", ln, re.I)
+               and re.search(r"\[VERIFY:\s*(acu-direct|acu-derived|native-isa-derived|correctness)\s*\]", ln)
+               for ln in sec.splitlines())
+
+
 def _dependency_cycles(upstream: dict[str, set[str]]) -> list[list[str]]:
     """Cycles in the ⇐ graph (each reported once, from its smallest id)."""
     found, seen_cycles = [], set()
@@ -503,7 +519,7 @@ def is_valid(text: str) -> bool:
 _SOURCE_TAG = re.compile(r"\[SOURCE:\s*(RS|smem)\s*\]", re.I)
 _RS_PROSE = re.compile(r"\bRS\s*[AB]?\s*operands?\b|register-?sourced|register-?fed|"
                        r"fed\s+(?:directly\s+)?from\s+registers", re.I)
-_SASS_DERIVED_TAG = re.compile(r"\[VERIFY:\s*sass-derived\s*\]")
+_SASS_DERIVED_TAG = re.compile(r"\[VERIFY:\s*(?:sass-derived|native-isa-derived)\s*\]")
 _SPILL_TERM = re.compile(r"spill", re.I)
 
 
@@ -564,7 +580,8 @@ _ALLOC_PIN = re.compile(r"USETMAXREG|setmaxnreg|DEALLOC\s+0x|TRY_ALLOC\s+0x|"
                         r"regs_per_thread\s*={1,2}\s*\d", re.I)
 _PRICED_TAG = re.compile(r"\[PRICED:\s*[^\]]*\S[^\]]*\]")
 _OPERAND_SOURCE_LINE = re.compile(r"mma_a_reg|mma_a_desc")
-_GATE_CLASSES = ("ncu-direct", "ncu-derived", "correctness", "sass-derived")
+_GATE_CLASSES = ("ncu-direct", "ncu-derived", "correctness", "sass-derived",
+                 "acu-direct", "acu-derived", "native-isa-derived")
 _VERIFY_CLASS = re.compile(r"\[VERIFY:\s*([A-Za-z-]+)\s*\]")
 
 

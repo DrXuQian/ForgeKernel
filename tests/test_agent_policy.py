@@ -155,7 +155,9 @@ def test_a_deny_path_that_contains_the_working_directory_is_dropped(tmp_path, ca
     pol = ap.from_config(cfg, oracle_mode="blackbox", repo_root=tmp_path / "run",
                          teacher_trees=[])
     s = pol.settings("student", ws)
-    assert s["sandbox"]["filesystem"]["denyRead"] == []
+    # The ancestor is dropped; operator-history packs remain denied.
+    from forgekernel.skills import history_dirs
+    assert set(s["sandbox"]["filesystem"]["denyRead"]) == {str(p.resolve()) for p in history_dirs()}
     assert "working directory" in capsys.readouterr().err
 
 

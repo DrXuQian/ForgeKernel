@@ -20,6 +20,7 @@ from forgekernel.paths import skills_dir
 SKILL_FILE = "SKILL.md"
 # Where Claude Code looks for a project's skills, relative to the agent's working directory.
 MIRROR_RELPATH = Path(".claude") / "skills"
+OPERATOR_HISTORY_SKILLS = frozenset({"ppu-kernel-knowledge", "ppu-profiling"})
 
 
 def skill_dirs() -> list[Path]:
@@ -27,7 +28,11 @@ def skill_dirs() -> list[Path]:
     return sorted(d for d in root.iterdir() if (d / SKILL_FILE).is_file()) if root.is_dir() else []
 
 
-def mirror(workspace: Path) -> list[str]:
+def history_dirs() -> list[Path]:
+    return [p for p in skill_dirs() if p.name in OPERATOR_HISTORY_SKILLS]
+
+
+def mirror(workspace: Path, *, include_operator_history: bool = True) -> list[str]:
     """Copy every skill into ``<workspace>/.claude/skills/<name>/`` (the caller keeps
     ``.claude/`` out of git), replacing whatever a previous turn left there."""
     dst_root = Path(workspace) / MIRROR_RELPATH
@@ -35,6 +40,8 @@ def mirror(workspace: Path) -> list[str]:
     for d in skill_dirs():
         dst = dst_root / d.name
         shutil.rmtree(dst, ignore_errors=True)
+        if d.name in OPERATOR_HISTORY_SKILLS and not include_operator_history:
+            continue
         shutil.copytree(d, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         names.append(d.name)
     return names

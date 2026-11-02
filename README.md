@@ -70,6 +70,10 @@ Show me the plan it prints.
 
 ## Quick Start
 
+**PPU:** native HGCC tasks use `forge init <op> --ppu --arch ppu10|ppu15`,
+ACU profiling and the PPU knowledge packs. See [PPU setup and workflow](docs/ppu.md)
+before the NVIDIA setup below. Target-device validation is still required.
+
 **Requirements.** The machine you run `forge` on: Linux or macOS, Python ≥ 3.11, git, and the
 [Claude Code](https://docs.claude.com/en/docs/claude-code/overview) CLI (logged in, or an
 `ANTHROPIC_API_KEY`); tmux if a task has no reference. The GPU machine (the same one, or an ssh

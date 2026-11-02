@@ -32,7 +32,7 @@ from forgekernel.paths import repo_root, template_dir
 SUITE = "forgekernel"
 PROBLEM = lbmod.PROBLEM_FILE                     # eval/leaderboard/problem.json
 LB_DIR = lbmod.LEADERBOARD_DIR
-KERNEL_FILE = {"cutedsl": "kernel.py", "cuda": "kernel.cu"}
+KERNEL_FILE = {"cutedsl": "kernel.py", "cuda": "kernel.cu", "ppu": "kernel.cpp"}
 CUTE_ARCH = {"sm90": "sm_90a", "sm100": "sm_100a", "sm103": "sm_103a", "sm120": "sm_120a"}
 EVAL_FILES = ("leaderboard.py", "timing.py", "precision.py", "closed_ref.py", "ncu_probe.py")
 NCU_PROBE_MODE = "cmd:ncu --csv --metrics gpu__time_active.sum python3 eval/ncu_probe.py"
@@ -94,6 +94,8 @@ def card_problem(task, check, *, reference_impl: dict | None = None,
         # the loop's meta tools (lever pricing, stall / SASS pricing, the timeline probe)
         # read the shapes named here one at a time: every shape, not a sample of them
         out["meta_workloads"] = [w["uuid"] for w in workloads]
+    if task.language == "ppu":
+        out["ppu"] = {"arch": task.arch}
     return out
 
 
@@ -133,6 +135,11 @@ def write_card(run, task, check, machine) -> Path:
     lb_dir.mkdir(parents=True, exist_ok=True)
     for name in EVAL_FILES:
         shutil.copy2(template_dir() / "eval" / name, op_dir / "eval" / name)
+    if task.language == "ppu":
+        for name in ("ppu_build.py", "ppu_loader.py", "ppu_profile.py"):
+            shutil.copy2(template_dir() / "eval" / name, op_dir / "eval" / name)
+        if task.ppu_builder:
+            shutil.copy2(_snapshot_path(run, task, task.ppu_builder), op_dir / "eval/ppu_build.py")
     for s in task.shapes:
         for g in s.inputs:
             dst = lb_dir / _input_rel(s.name, g)
@@ -153,6 +160,9 @@ def write_card(run, task, check, machine) -> Path:
         clock_note="A task runs at the GPU's own clocks unless LB_SM_CLOCK_MHZ / "
                    "LB_MEM_CLOCK_MHZ pin one (that needs permission to lock); the eval JSON "
                    "records which (leaderboard.clock).")
+    if task.language == "ppu":
+        from forgekernel.ppu import render_gpu_entry
+        text = render_gpu_entry(task.arch)
     entry.write_text(text.replace("--launch-count 24", f"--launch-count {ncu_launch_count(problem)}"),
                      encoding="utf-8")
     entry.chmod(0o755)
@@ -280,8 +290,11 @@ def write_submit(tree: Path, task, machine, timeout: int = JOB_TIMEOUT_S) -> Pat
         f'workdir = {json.dumps(machine.remote_workdir)}',
         f'env_file = {json.dumps(machine.remote_env_file)}', f'gpu = "{machine.gpu}"',
         "[env]", 'PYTHONUNBUFFERED = "1"',
-        f'CUTE_DSL_ARCH = "{CUTE_ARCH.get(task.arch, task.arch + "a")}"',
     ]
+    if task.language == "ppu":
+        lines.append(f'FK_PPU_ARCH = "{task.arch}"')
+    else:
+        lines.append(f'CUTE_DSL_ARCH = "{CUTE_ARCH.get(task.arch, task.arch + "a")}"')
     p = Path(tree) / "submit.toml"
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return p
@@ -341,13 +354,27 @@ def write_loop_toml(run, task, op_dir: Path, *, deny: list[str], ncu: bool = Tru
         ]
     if not ncu:
         lines += [
-            "# NCU cannot profile on this machine: timing only",
+            "# The profiler is unavailable on this machine: timing only",
             "ncu_available     = false",
-            'job_env_preflight = "warn"',
+            f'job_env_preflight = "{"off" if task.language == "ppu" else "warn"}"',
             'timeline_probe    = "off"',
             "stall_pricing     = false",
             "orch_census       = false",
         ]
+    if task.language == "ppu":
+        lines += [
+            "# PPU has native ACU/ISA evidence; NVIDIA instrumentation is inapplicable.",
+            'profiler_backend  = "acu"',
+        ]
+        if ncu:
+            lines += ['job_env_preflight = "off"', 'timeline_probe = "off"',
+                      "stall_pricing = false", "orch_census = false"]
+        # Native SDK headers are infrastructure, not the reference operator.
+        import os
+        roots = [str(Path(os.environ[key]).expanduser().resolve() / "include")
+                 for key in ("PPU_SDK", "PPU_ACTLIZE_DIR") if os.environ.get(key)
+                 and (Path(os.environ[key]).expanduser() / "include").is_dir()]
+        lines.append(f"ppu_source_dirs = {json.dumps(roots)}")
     p = Path(op_dir) / "loop.toml"
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return p
@@ -371,16 +398,18 @@ def render_kernel_stub(task, check) -> str:
     shapes = "\n".join(f"    {s.name}: {json.dumps(s.axes)}" for s in task.shapes)
     ins = "\n".join(_spec(n, s) for n, s in check.definition["inputs"].items())
     outs = "\n".join(_spec(n, s) for n, s in check.definition["outputs"].items())
-    if task.language == "cuda":
+    if task.language in ("cuda", "ppu"):
+        native_header = "#include <hggc_runtime.h>\n" if task.language == "ppu" else ""
         params = ", ".join(lbmod._cpp_param(n, s) for n, s in check.definition["inputs"].items())
         comment = "\n".join("// " + line for line in (
-            f"{task.name} -- the student's kernel, CUDA C++ (one file, its own torch binding).",
+            f"{task.name} -- the student's kernel, {task.language} C++ (one file, its own torch binding).",
             "", "Value-returning: return the output tensor.", "", "Shapes (one kernel serves all):",
             *shapes.splitlines(), "Inputs:", *ins.splitlines(), "Outputs:", *outs.splitlines(),
             "", "Judged against the task's judge (eval/leaderboard/problem.json, \"reference\")."))
         return f"""{comment}
 
 #include <torch/extension.h>
+{native_header}
 
 torch::Tensor run({params}) {{
     TORCH_CHECK(false, "write the kernel");

@@ -89,18 +89,35 @@ def cmd_init(argv) -> int:
     problem; with any other option, an operator tree made directly (forgekernel.scaffold)."""
     if "--leaderboard" in argv or any(a.startswith("--leaderboard=") for a in argv):
         return new_board_task(argv)
-    if any(a.startswith("-") and a not in ("-h", "--help") for a in argv):
+    ppu = "--ppu" in argv
+    if not ppu and any(a.startswith("-") and a not in ("-h", "--help") for a in argv):
         from forgekernel.scaffold import main as scaffold_main
         return scaffold_main(argv)
     p = argparse.ArgumentParser(prog="forge init",
                                 description="Create tasks/<op>/ from tasks/_template/.")
     p.add_argument("op")
+    p.add_argument("--ppu", action="store_true", help="create a native PPU task")
+    p.add_argument("--arch", choices=("ppu10", "ppu15"),
+                   help="confirmed native target; required with --ppu")
     args = p.parse_args(argv)
+    if args.ppu and args.arch is None:
+        p.error("--ppu requires --arch ppu10 or ppu15; inspect the target machine first")
+    if not args.op or Path(args.op).name != args.op or args.op in (".", ".."):
+        p.error("op must be one task directory name")
     d = repo_root() / TASKS_DIR / args.op
     if d.exists():
         sys.stderr.write(f"[forge] {d} already exists\n")
         return 2
     shutil.copytree(repo_root() / TASKS_DIR / TEMPLATE_TASK, d)
+    if args.ppu:
+        config = d / "task.toml"
+        config.write_text(config.read_text().replace(
+            'language = "cutedsl"                 # cutedsl | cuda',
+            'language = "ppu"                     # native HGCC C++ extension').replace(
+            'arch     = "sm100"                   # the target GPU (sm90, sm100, ...)',
+            f'arch     = "{args.arch}"                    # confirmed PPU target')
+            + '\n# Optional trusted task-local build adapter; see docs/ppu.md.\n'
+              '# [ppu]\n# build = "build.py"\n', encoding="utf-8")
     _say(f"wrote {d}/: fill in description.md and shapes.json, adjust task.toml, add "
          f"reference/ if you have one, then `forge new {TASKS_DIR}/{args.op}`")
     return 0
@@ -443,12 +460,13 @@ def _drive(run, task, machine, *, resuming: bool, harvest_only: bool) -> int:
     else:
         raise RuntimeError(f"the judge did not agree with the reference after "
                            f"{judge_mod.ATTEMPTS} attempts: {feedback}")
-    run.update(stage="probing NCU")
+    profiler = "ACU" if task.language == "ppu" else "NCU"
+    run.update(stage=f"probing {profiler}")
     ncu = probe_ncu(task, op_dir)
     run.update(ncu_available=ncu, stage="the loop")
     if not ncu:
-        _say("NCU cannot profile on this machine: the run degrades to timing only (no "
-             "per-kernel signatures, no timeline / stall pricing)")
+        _say(f"{profiler} cannot profile on this machine: timing remains available; "
+             "per-kernel counters are unavailable")
     taskcard.write_loop_toml(run, task, op_dir, deny=deny, ncu=ncu)
     taskcard.clone_workspace(op_dir, run.ws)
     return run_loop(run, task, resuming=resuming, harvest_only=harvest_only)
@@ -513,11 +531,17 @@ def probe_ncu(task, op_dir: Path) -> bool:
     machine local.env names may have changed since the last one)."""
     from forgekernel.loop.cli import BackendError, RealBackend
     be = RealBackend(task.name, op_dir, None, "forge-judge", "forge-judge@localhost")
+    mode = ("cmd:python3 eval/ppu_profile.py --probe" if task.language == "ppu"
+            else taskcard.NCU_PROBE_MODE)
     try:
-        log = be.submit_gpu(taskcard.BRANCH, taskcard.NCU_PROBE_MODE)
+        log = be.submit_gpu(taskcard.BRANCH, mode)
     except BackendError as e:
-        _say(f"the NCU probe job failed ({e}); assuming NCU is unavailable")
+        profiler = "ACU" if task.language == "ppu" else "NCU"
+        _say(f"the {profiler} probe job failed ({e}); assuming {profiler} is unavailable")
         return False
+    if task.language == "ppu":
+        from forgekernel.inner.acu import profiler_from_acu
+        return bool(profiler_from_acu(log))
     return ncu_probe_ok(log)
 
 

@@ -580,6 +580,14 @@ class LoopContext:
     # verdict instead of re-buying ref jobs at every subsequent plateau.
     reanchor_memo: "tuple[float, str] | None" = None
 
+    def __post_init__(self) -> None:
+        if lang_mode.is_ppu(self.language):
+            # These frozen instruments parse NVIDIA SASS/PTX or patch CuTe DSL.
+            # PPU measurements use ACU and teacher/student native script probes.
+            self.stall_pricing = False
+            self.orch_census = False
+            self.timeline_probe = "off"
+
 
 # --- prompt rendering -------------------------------------------------------
 
@@ -671,7 +679,8 @@ def _meta_prompt(ctx: LoopContext, name: str) -> Path:
 
 def _is_cuda(ctx: LoopContext) -> bool:
     """A CUDA-mode run: its student edits a .cu the card builds with nvcc."""
-    return lang_mode.is_cuda(ctx.language) or lang_mode.is_cuda_kernel_file(ctx.kernel_file)
+    return not lang_mode.is_ppu(getattr(ctx, "language", None)) and (
+        lang_mode.is_cuda(ctx.language) or lang_mode.is_cuda_kernel_file(ctx.kernel_file))
 
 
 def _bindings(ctx: LoopContext) -> dict[str, str]:
@@ -1645,6 +1654,9 @@ def _run_ablation_probe(ctx: LoopContext, be, path: str, probe_branch: str):
     design turn on the best tree, a probe answers a cause question on the
     current one. The spec is normalised in place (kernel_file, rounds,
     roles off) and committed with the toolkit, like a script probe."""
+    if lang_mode.is_ppu(ctx.language):
+        return [], ("native PPU needs a script probe with clean A/B timing; the frozen "
+                    "JSON ablation runner is NVIDIA-specific"), ""
     spec_path = Path(ctx.workspace) / path
     try:
         raw = json.loads(spec_path.read_text(encoding="utf-8"))
@@ -1880,6 +1892,8 @@ def _ncu_mode(ctx: LoopContext) -> str:
     """The per-iteration profile job: the op's plain ``ncu`` task, or the same
     task wrapped by the vendored orchestration census when the runner is in the
     workspace (seeded with the pricing toolkit) and the run has not opted out."""
+    if lang_mode.is_ppu(getattr(ctx, "language", None)):
+        return "acu"
     if getattr(ctx, "orch_census", False) and (
             Path(ctx.workspace) / "notes" / _ORCH_CENSUS_RUNNER).exists():
         if _is_cuda(ctx):
@@ -6812,7 +6826,7 @@ def run_meta_step(ctx: LoopContext, *, best_before: float | None = None,
         patch_out = _teacher(be).run_agent(render_prompt(_meta_prompt(ctx, "patch_prompt.md"), bindings, extra))
         violations = _patch_landing_violations(
             at_entry, _read_milestone(ctx), _parse_list(patch_out, "changed_entries"))
-        violations += _validate_milestone_file(ctx.milestone, baseline=at_entry)
+        violations += _validate_milestone_file(ctx.milestone, baseline=at_entry, language=ctx.language)
         if not violations:
             break
         _log(f"meta: patch has {len(violations)} violation(s) -> re-prompt: {violations[0]}")
@@ -6935,7 +6949,7 @@ def _line_delta(before: str, after: str) -> str:
 
 
 def _validate_milestone_file(milestone, authoring: bool = False,
-                             baseline: str | None = None) -> list[str]:
+                             baseline: str | None = None, language: str | None = None) -> list[str]:
     """Violations in the milestone file — a missing or unreadable file is itself one.
 
     Absence is the pre-distillation state, not a conformant milestone. Reporting it
@@ -6955,7 +6969,7 @@ def _validate_milestone_file(milestone, authoring: bool = False,
     p = Path(milestone)
     try:
         return validate_milestone(p.read_text(encoding="utf-8"),
-                                  authoring=authoring, baseline=baseline)
+                                  authoring=authoring, baseline=baseline, language=language)
     except OSError as e:
         return [f"milestone file unreadable ({p}): {type(e).__name__}"]
 
@@ -8285,7 +8299,7 @@ def _needs_authoring(ctx: LoopContext) -> bool:
         return False
     if ctx.oracle_mode == "source" and not ctx.oracle_path:
         return False
-    return bool(_validate_milestone_file(ctx.milestone))
+    return bool(_validate_milestone_file(ctx.milestone, language=ctx.language))
 
 
 @dataclass
@@ -8706,6 +8720,12 @@ def run_recon_step(ctx: LoopContext) -> ReconResult:
     # against wrong data. Reusing a prior tree stays legal: the teacher just has
     # to re-affirm the write-up by touching it this session.
     session_start = time.time()
+    # Filesystem timestamps may lag wall time by a clock tick. Compare the
+    # artifacts with their pre-session versions rather than misclassifying a
+    # freshly written report as stale. Unchanged prior reports still fail.
+    paths = ([ctx.recon_path, ctx.recon_path.parent / "candidates.md"]
+             if ctx.recon_path is not None else [])
+    ctx._recon_freshness = (session_start, {str(p): _recon_file_version(p) for p in paths})
     sass_ok = False  # flipped by the first job log carrying a SASS-OK verdict line
     sched_ok = False  # ditto, SCHED-OK (schedule transcription delivered)
     live_ok = False   # ditto, LIVE-OK (register-liveness ledger delivered)
@@ -8887,14 +8907,28 @@ def _recon_artifacts_written(ctx: LoopContext, since: float | None = None) -> bo
     if ctx.recon_path is None:
         return True
     candidates = ctx.recon_path.parent / "candidates.md"
+    snapshot = getattr(ctx, "_recon_freshness", None)
     for p in (ctx.recon_path, candidates):
         try:
             mtime = p.stat().st_mtime
         except OSError:  # missing (FileNotFoundError) or unreadable
             return False
-        if since is not None and mtime < since:
-            return False
+        if since is not None:
+            if snapshot is not None and snapshot[0] == since:
+                if _recon_file_version(p) == snapshot[1].get(str(p)):
+                    return False
+            elif mtime < since:
+                return False
     return True
+
+
+def _recon_file_version(path: Path) -> tuple | None:
+    try:
+        stat = path.stat()
+        return (stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size,
+                hashlib.sha256(path.read_bytes()).digest())
+    except OSError:
+        return None
 
 
 # The verdict line only sass_tools.analyze prints, and only after its self-checks
@@ -9719,6 +9753,8 @@ def _missing_recon_evidence(ctx: LoopContext, sass_ok: bool, sched_ok: bool,
                             struct_ok: bool = True,
                             near_miss: dict | None = None) -> list:
     """Channel names whose evidence is neither delivered nor waived."""
+    if lang_mode.is_ppu(ctx.language):
+        return _missing_ppu_evidence(ctx)
     near = near_miss or {}
     missing = []
     if not _verdict_evidence(ctx, sass_ok, _SASS_WAIVED,
@@ -9762,9 +9798,27 @@ def _sass_evidence(ctx: LoopContext, sass_ok: bool,
     its own report names the single round that would have closed four open gaps.
     Prose discipline in the prompt did not force that round; this check does.
     """
+    if lang_mode.is_ppu(ctx.language):
+        return not _missing_ppu_evidence(ctx)
     return _verdict_evidence(ctx, sass_ok, _SASS_WAIVED,
                              _DELIVERED_MISMATCH["SASS"],
                              "SASS" in (near_miss or {}))
+
+
+def _missing_ppu_evidence(ctx: LoopContext) -> list[str]:
+    """Require an owned native evidence status, never a synthetic NVIDIA verdict.
+
+    This checks write-up completeness only. Actual correctness, timing and KB
+    certification still come from submitted jobs, not these teacher statements.
+    """
+    if ctx.recon_path is None or ctx.recon_dir is None:
+        return []
+    try:
+        report = ctx.recon_path.read_text()
+    except OSError:
+        report = ""
+    return [name for name in ("ACU", "NATIVE-ISA")
+            if not re.search(rf"(?m)^{name}-EVIDENCE:\s*\S[^\n]*", report)]
 
 
 _SASS_GATE_MSG = (
@@ -9893,6 +9947,13 @@ _STRUCT_GATE_MSG = (
 
 def _evidence_gate_msg(missing: list, near_miss: dict | None = None,
                        ctx: "LoopContext | None" = None) -> str:
+    if ctx is not None and lang_mode.is_ppu(ctx.language):
+        return ("\n\nNative PPU evidence status is missing: " + ", ".join(missing)
+                + ". Write ACU-EVIDENCE: and NATIVE-ISA-EVIDENCE: lines in the recon "
+                  "report. Each names the job/report and measured scope, or says "
+                  "unavailable with the concrete reason and remaining unknowns. "
+                  "Do not substitute NVIDIA verdicts. This records coverage; it "
+                  "does not certify the candidate.\n")
     parts = []
     if "SASS" in missing:
         parts.append(_SASS_GATE_MSG)
@@ -9981,7 +10042,8 @@ def _seed_sass_tools(ctx: LoopContext, rbe) -> None:
     # §2f/§2g tell the teacher both are seeded (a teacher once had to
     # copy them in by hand). launch_tools: §1's cluster shape off the NCU
     # launch metrics, never off the grid shape.
-    for vendor in map(importlib.import_module, RECON_SEEDED_MODULES):
+    modules = () if lang_mode.is_ppu(getattr(ctx, "language", None)) else RECON_SEEDED_MODULES
+    for vendor in map(importlib.import_module, modules):
         text = Path(vendor.__file__).read_text()
         name = Path(vendor.__file__).name
         dst = ctx.recon_dir / "notes" / name
@@ -10548,7 +10610,7 @@ def job_env_preflight(ctx: LoopContext, policy: str = "refuse") -> str | None:
 
     Returns the failures as one line, or None (all clear, not judged, or off).
     """
-    if policy == "off":
+    if policy == "off" or lang_mode.is_ppu(ctx.language):
         return None
     be = ctx.backend
     branch = f"{ctx.branch_prefix}-jobenv"
@@ -11116,7 +11178,9 @@ def _require_recon_artifacts(ctx: LoopContext, be, sass_ok: bool = True,
             gaps.append("Both deliverables are on disk but **were not written by this "
                         "reconnaissance** (stale residue) — check that their content belongs "
                         "to this operator, and update them in this session.")
-        if lacking:
+        if lacking and lang_mode.is_ppu(ctx.language):
+            gaps.append(_evidence_gate_msg(lacking, ctx=ctx))
+        elif lacking:
             # GPU rounds are gone, so delivery is off the table — the only remaining
             # legal state is an owned waiver, not a silent absence.
             waivers = " / ".join(f"`{n}-WAIVED: <the concrete reason and the channels tried>`"
@@ -11179,6 +11243,14 @@ def _source_recon_distill_addendum(ctx: LoopContext) -> str:
     if not ctx.recon_path.is_file():
         return ""
     candidates = ctx.recon_path.parent / "candidates.md"
+    if lang_mode.is_ppu(ctx.language):
+        return (
+            f"\nRead the native recon report at {ctx.recon_path} and candidates at "
+            f"{candidates} before the oracle. Reconcile source intent with measured "
+            "ACU/native-ISA findings; cite actual job scope and preserve unavailable "
+            "channels. Use source only for facts it establishes, and label estimates "
+            "and their falsifying experiments. The student receives contracts, not "
+            "the reference implementation or historical source narratives.\n")
     return (
         "\n## Recon report (supplementary input in source mode)\n\n"
         f"Before distillation this run reconnoitred the reference binary: `RECON_REPORT` = "
@@ -11377,7 +11449,7 @@ def run_distill_step(ctx: LoopContext) -> "MetaResult":
                         f"(last output tail: {out[-160:]!r})")
         else:
             dead_rounds = 0
-        violations = _validate_milestone_file(ctx.milestone, authoring=True)
+        violations = _validate_milestone_file(ctx.milestone, authoring=True, language=ctx.language)
         try:
             draft = Path(ctx.milestone).read_text(encoding="utf-8")
         except OSError:

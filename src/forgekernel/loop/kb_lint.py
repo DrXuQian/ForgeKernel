@@ -384,6 +384,11 @@ def lint_exam_surfaces(repo_root: Path) -> list[str]:
     files.extend(root / f for f in EXAM_SURFACE_FILES if (root / f).is_file())
     for file in files:
         label = str(file.relative_to(root))
+        # Teacher/bootstrap histories are denied to students and blackbox
+        # teachers by AgentPolicy. They are not student exam surfaces.
+        from forgekernel.skills import OPERATOR_HISTORY_SKILLS
+        if any(label.startswith(f"skills/{name}/") for name in OPERATOR_HISTORY_SKILLS):
+            continue
         try:
             text = file.read_text(encoding="utf-8")
         except OSError as e:

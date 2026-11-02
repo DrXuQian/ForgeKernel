@@ -211,11 +211,15 @@ def ref_tree_gpu_entry(card_text: str, module: str, key_env: str = KEY_ENV,
     before = _with_key_preamble(head + before.split("\n", 1)[1], key_env)
     ncu = ('ncu_bounded ncu --csv --target-processes all --profile-from-start off \\\n'
            '            --launch-count 24 --kill yes --metrics "$NCU_METRICS" python3 eval/ncu_run.py')
+    profile_task = "ncu"
+    if "export FK_PPU_ARCH=" in card_text:
+        ncu = "profile_bounded python3 eval/ppu_profile.py"
+        profile_task = "acu|ncu"
     tasks = f'''case "$TASK" in
     check)       run_with_timeout python3 sealref.py check ;;
     crosscheck)  run_with_timeout python3 sealref.py crosscheck ;;
     bench|ref)   run_with_timeout python3 sealref.py bench ;;
-    ncu)
+    {profile_task})
         {ncu}
         ;;
     sealref)

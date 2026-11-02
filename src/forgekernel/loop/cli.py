@@ -1162,7 +1162,8 @@ _ORACLE_PLAN = {
 }
 
 
-def _will_distill(milestone: Path, oracle: str | None, mode: str = ORACLE_SOURCE) -> bool:
+def _will_distill(milestone: Path, oracle: str | None, mode: str = ORACLE_SOURCE,
+                  language: str | None = None) -> bool:
     """True when this run is going to author a milestone, so it needs a baseline.
 
     A resumed run against a milestone that already exists must not re-measure: the
@@ -1173,7 +1174,7 @@ def _will_distill(milestone: Path, oracle: str | None, mode: str = ORACLE_SOURCE
         return False
     from forgekernel.milestone import validate_milestone
     try:
-        return bool(validate_milestone(milestone.read_text(encoding="utf-8")))
+        return bool(validate_milestone(milestone.read_text(encoding="utf-8"), language=language))
     except OSError:
         return True  # missing milestone == not distilled yet
 
@@ -1552,7 +1553,7 @@ def _ensure_ref_baseline(op: str, op_dir: Path, milestone: Path, oracle: str | N
     under this role instead of buying the same jobs twice.
     """
     existing = _cluster_guarded(op, load_baseline(op_dir))
-    if existing or not _will_distill(milestone, oracle, mode):
+    if existing or not _will_distill(milestone, oracle, mode, cfg.get("loop", {}).get("language")):
         return existing
     if not measure:
         return None
@@ -1837,11 +1838,11 @@ def _has_distillation_input(oracle: str | None, mode: str) -> bool:
     return bool(oracle)
 
 
-def _milestone_valid(milestone: Path) -> bool:
+def _milestone_valid(milestone: Path, language: str | None = None) -> bool:
     """A milestone on disk that passes the §9 gate (what _will_distill would skip on)."""
     from forgekernel.milestone import validate_milestone
     try:
-        return not validate_milestone(Path(milestone).read_text(encoding="utf-8"))
+        return not validate_milestone(Path(milestone).read_text(encoding="utf-8"), language=language)
     except OSError:
         return False
 
@@ -1978,7 +1979,7 @@ def _student_denied_oracle(mode: str, oracle_flag: str | None, cfg: dict,
 
 
 # valid kernel implementation languages (governs the student prompt + harness).
-LANGUAGES = ("cuda-cpp", "inline-ptx", "triton", "cutlass-cpp", "cutedsl", "cuda-sol")
+LANGUAGES = ("cuda-cpp", "inline-ptx", "triton", "cutlass-cpp", "cutedsl", "cuda-sol", "ppu")
 
 
 def _card_kernel_file(op_dir: Path) -> str:
@@ -2382,7 +2383,8 @@ def _main(argv: list[str] | None = None) -> int:
         goal_settings = goal_ref_mod.settings(cfg, getattr(args, "ref_from_goal_hours", None))
         goal_plan = goal_ref_mod.plan(
             op_dir, mode=goal_mode, oracle_mode=oracle_mode, oracle_paths=declared_oracle,
-            milestone_valid=_milestone_valid(milestone))
+            milestone_valid=_milestone_valid(
+                milestone, _resolve_language(args.language, cfg, args.kernel_file)))
     except goal_ref_mod.GoalRefError as e:
         sys.stderr.write(f"[loop] error: ref_from_goal: {e}\n")
         if not args.dry_run:
@@ -2590,7 +2592,7 @@ def _main(argv: list[str] | None = None) -> int:
     # against numbers that do not exist yet. Measuring it first also fails fast: it is
     # the step most likely to be broken, and finding that out costs one job instead of
     # a library measurement plus a distillation.
-    will_distill = _will_distill(milestone, oracle, oracle_mode)
+    will_distill = _will_distill(milestone, oracle, oracle_mode, language)
     arch_baseline = _ensure_arch_baseline(
         args.op, op_dir, cfg, measure=not args.dry_run)
     if not args.dry_run and (why := check_arch_ref_ready(

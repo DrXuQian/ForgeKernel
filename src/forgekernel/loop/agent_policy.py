@@ -86,6 +86,7 @@ KEY_DSL_SOURCE_DIRS = "dsl_source_dirs"
 # an offline CUDA student may read. Falls back to dsl_source_dirs, where older
 # configs declared them.
 KEY_CUDA_SOURCE_DIRS = "cuda_source_dirs"
+KEY_PPU_SOURCE_DIRS = "ppu_source_dirs"
 KEY_EXTRA_ALLOW_WRITE = "agent_allow_write"
 # A source run whose ref_source_paths / ref_source_urls name OTHER implementations (earlier
 # runs on the operator, sister libraries) rather than the oracle itself: true denies them
@@ -153,6 +154,9 @@ class AgentPolicy:
     # (loop/goal_ref.py), which writes a reference from scratch and may look things up.
     # The GPU-machine CLIs stay off — its GPU channel is the loop's ledgered eval command.
     student_online: bool = False
+    # Only reference generation may opt in: it has no accepted oracle yet, but
+    # retains all ordinary student restrictions on reference sources and keys.
+    ppu_bootstrap_history: bool = False
     # Paths the agent may read but not write, by the file tools or the shell: the
     # ref_from_goal session's ledger, state and candidates (goal_ref.session_read_only_paths)
     # — the records its deliverable check and its acceptance trust.
@@ -161,6 +165,11 @@ class AgentPolicy:
 
     def _teacher_denied(self) -> bool:
         return self.oracle_mode == ORACLE_BLACKBOX or self.source_teacher_denies
+
+    def history_allowed(self, role: str) -> bool:
+        return (role != ROLE_STUDENT and not self._teacher_denied()) or (
+            role == ROLE_STUDENT and self.ppu_bootstrap_history
+            and lang_mode.is_ppu(self.language) and self.oracle_mode == "source")
 
     # -- what each role is denied ------------------------------------------------------
 
@@ -173,6 +182,9 @@ class AgentPolicy:
             # A source run's teacher distils FROM the reference source: denying it
             # would remove the run's input, not enforce anything.
             paths = []
+        if not self.history_allowed(role):
+            from forgekernel.skills import history_dirs
+            paths.extend(p.resolve() for p in history_dirs())
         seen, out = set(), []
         for p in paths:
             if p not in seen:
@@ -305,12 +317,24 @@ class AgentPolicy:
     def notice(self, role: str) -> str:
         lines = ["## Runtime environment constraints (enforced by the harness, not advice)"]
         cuda = lang_mode.is_cuda(self.language)
+        ppu = lang_mode.is_ppu(self.language)
+        source_kind = "PPU SDK / actlize headers" if ppu else ("CUDA / CUTLASS headers" if cuda else "DSL package sources")
+        if ppu and self.history_allowed(role):
+            lines.append(
+                "- For a PPU task, read `.claude/skills/ppu-kernel-knowledge/SKILL.md` "
+                "and the relevant architecture/operator references before reconnaissance "
+                "and M0 candidate selection. Record source section, original target, evidence "
+                "level, current applicability and a falsifiable experiment in recon/candidates. "
+                "Revisit relevant lessons after profiles, numerical failures and regressions; "
+                "use `.claude/skills/ppu-profiling/SKILL.md` for ACU/Asys. Historical lessons "
+                "are prior knowledge, not target-certified hw_kb recipes or student-readable "
+                "reference implementations. Respect this run's existing source restrictions.")
         if self.offline(role):
             lines.append(
                 "- **No network this turn**: WebFetch / WebSearch are removed, and every outbound "
                 "connection from Bash (curl, pip, git clone, python networking) is refused by the "
                 "sandbox. Do not try to go online; look up interface details in the KB, the local "
-                + ("CUDA / CUTLASS headers" if cuda else "DSL package sources")
+                + source_kind
                 + " and your own probes.")
             lines.append(
                 "- **You may write only your own working directory**: the rest of the repo "
@@ -321,8 +345,9 @@ class AgentPolicy:
                 "`.gitattributes` come from the card, and every job runs the card's copy; a delivery "
                 "that modifies them is not evaluated at all and is REVERTed outright.")
             if self.dsl_source_dirs:
-                lines.append(("- Readable local CUDA / CUTLASS header directories: " if cuda
-                              else "- Readable local DSL package sources: ") + ", ".join(
+                label = ("PPU SDK / actlize header directories" if ppu else
+                         "CUDA / CUTLASS header directories" if cuda else "DSL package sources")
+                lines.append(f"- Readable local {label}: " + ", ".join(
                     f"`{p}`" for p in self.dsl_source_dirs))
         elif role == ROLE_STUDENT:
             lines.append(
@@ -391,7 +416,7 @@ class AgentPolicy:
             encoding="utf-8")
         # the repository's skills/, where Claude Code finds them (ForgeTrain's mirroring)
         from forgekernel import skills
-        skills.mirror(workspace)
+        skills.mirror(workspace, include_operator_history=self.history_allowed(role))
         _git_exclude(workspace, ".claude/")
         return settings_path
 
@@ -517,6 +542,7 @@ def declaration_problems(cfg: dict, oracle_mode: str) -> list[str]:
     lc = cfg.get("loop", {})
     problems = []
     for key in (KEY_REF_SOURCE_PATHS, KEY_REF_SOURCE_URLS, KEY_DSL_SOURCE_DIRS,
+                KEY_CUDA_SOURCE_DIRS, KEY_PPU_SOURCE_DIRS,
                 KEY_EXTRA_ALLOW_WRITE):
         if key in lc and not (isinstance(lc[key], list)
                               and all(isinstance(x, str) for x in lc[key])):
@@ -544,6 +570,14 @@ def declaration_warnings(cfg: dict, dsl_source=None, language: str | None = None
     CUDA-mode run is checked for its header trees instead (``cuda_source_dirs``)."""
     lc = cfg.get("loop", {})
     out = []
+    if lang_mode.is_ppu(language):
+        roots = lc.get(KEY_PPU_SOURCE_DIRS) or []
+        if not roots:
+            out.append("[loop] ppu_source_dirs is empty: provision the selected PPU SDK/actlize headers for the offline student")
+        for raw in roots:
+            if not _abs(raw).exists():
+                out.append(f"[loop] ppu_source_dirs entry {raw!r} does not exist on this machine")
+        return out
     if lang_mode.is_cuda(language):
         for key in (KEY_REF_SOURCE_PATHS, KEY_CUDA_SOURCE_DIRS, KEY_DSL_SOURCE_DIRS):
             for raw in lc.get(key, []) if isinstance(lc.get(key), list) else []:
@@ -597,6 +631,8 @@ def from_config(cfg: dict, *, oracle_mode: str, repo_root: Path,
     declared = lc.get(KEY_DSL_SOURCE_DIRS, [])
     if lang_mode.is_cuda(language):
         declared = lc.get(KEY_CUDA_SOURCE_DIRS) or declared
+    if lang_mode.is_ppu(language):
+        declared = lc.get(KEY_PPU_SOURCE_DIRS) or declared
     return AgentPolicy(
         oracle_mode=oracle_mode,
         repo_root=_abs(repo_root),

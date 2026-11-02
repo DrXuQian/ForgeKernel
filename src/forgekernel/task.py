@@ -79,9 +79,9 @@ GLOBAL_FILES = ("models.toml", "loop.toml")
 DESCRIPTION_FILE = "description.md"
 SHAPES_FILE = "shapes.json"
 
-LANGUAGES = ("cutedsl", "cuda")
+LANGUAGES = ("cutedsl", "cuda", "ppu")
 # The loop's own language name for each task language (forgekernel.loop.lang_mode).
-LOOP_LANGUAGE = {"cutedsl": "cutedsl", "cuda": "cuda-sol"}
+LOOP_LANGUAGE = {"cutedsl": "cutedsl", "cuda": "cuda-sol", "ppu": "ppu"}
 TIMINGS = ("device", "e2e")
 BACKENDS = ("claude",)
 ROLES = ("teacher", "student")
@@ -113,6 +113,7 @@ _KEYS = {
     "agent.role": {"backend", "provider", "model", "effort", "timeout_s"},
     "budget": {"hours", "max_meta", "reference_hours"},
     "leaderboard": {"suite", "card", "ref"},
+    "ppu": {"build"},
 }
 _KEYS["agent"] = _KEYS["agent.role"] | set(ROLES)
 
@@ -209,6 +210,7 @@ class Task:
     budget: Budget
     notes: tuple = field(default=())   # non-fatal remarks worth printing at launch
     leaderboard: Leaderboard | None = None
+    ppu_builder: Path | None = None
 
     @property
     def mode(self) -> str:
@@ -252,9 +254,10 @@ def load_task(task_dir: str | Path, *, kb_root: Path | None = None,
     if language not in LANGUAGES:
         problems.append(f"[task] language must be one of {list(LANGUAGES)}, got {language!r}")
     arch = t.get("arch")
-    if not isinstance(arch, str) or not re.match(r"^sm\d+[a-z]?$", arch or ""):
-        problems.append(f"[task] arch must name a GPU architecture such as \"sm90\" or "
-                        f"\"sm100\", got {arch!r}")
+    arch_pattern = r"^ppu(?:10|15)$" if language == "ppu" else r"^sm\d+[a-z]?$"
+    if not isinstance(arch, str) or not re.fullmatch(arch_pattern, arch or ""):
+        choices = '"ppu10" or "ppu15"' if language == "ppu" else '"sm90" or "sm100"'
+        problems.append(f"[task] arch must name a matching architecture such as {choices}, got {arch!r}")
     elif language in LANGUAGES:
         kb = _kb_dir(kb_root, language, arch)
         if not kb.is_dir():
@@ -273,6 +276,16 @@ def load_task(task_dir: str | Path, *, kb_root: Path | None = None,
             problems.append("[reference]: a leaderboard task's reference is the board's "
                             "(sealed into its card at `forge new`); leave the table out")
     reference = _read_reference(d, cfg, problems)
+    ppu_builder = None
+    if "ppu" in own:
+        if language != "ppu":
+            problems.append("[ppu] is only valid with [task] language = 'ppu'")
+        if "build" in _table(cfg, "ppu", problems):
+            ppu_builder = _inside(d, cfg["ppu"]["build"], "[ppu] build", problems)
+            if ppu_builder is not None and (not ppu_builder.is_file() or ppu_builder.suffix != ".py"):
+                problems.append("[ppu] build must name a task-owned Python build adapter")
+    if language == "ppu" and board is not None:
+        problems.append("PPU tasks use their own reference, judge and clock; NVIDIA leaderboard cards are not PPU tasks")
     target = _read_target(cfg, problems)
     teacher = _read_agent(cfg.get("agent", {}), "teacher", problems)
     student = _read_agent(cfg.get("agent", {}), "student", problems)
@@ -292,7 +305,8 @@ def load_task(task_dir: str | Path, *, kb_root: Path | None = None,
                          f"adds {s.groups_to_add}")
     return Task(name=name, dir=d, language=language, arch=arch, description=description,
                 shapes=tuple(shapes), reference=reference, target=target, teacher=teacher,
-                student=student, budget=budget, notes=tuple(notes), leaderboard=board)
+                student=student, budget=budget, notes=tuple(notes), leaderboard=board,
+                ppu_builder=ppu_builder)
 
 
 BOARD_SUITES = ("flashinfer-bench", "sol-execbench")

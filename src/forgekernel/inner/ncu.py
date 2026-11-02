@@ -410,6 +410,9 @@ def kernel_split(parsed: dict[str, dict[str, str]]) -> dict[str, float | int]:
 
 def profiler_from_ncu(csv_text: str, *, kernel: str | None = None) -> dict[str, float | int]:
     """Parse raw NCU CSV straight into the per-iteration ``profiler`` dict."""
+    if "FORGE_PPU_ACU_CSV" in csv_text or "ppu__time_duration.sum" in csv_text:
+        from forgekernel.inner.acu import profiler_from_acu
+        return profiler_from_acu(csv_text, kernel=kernel)
     parsed = parse_ncu_csv(csv_text)
     return {**key_metrics(parsed, kernel=kernel), **kernel_split(parsed)}
 
@@ -441,6 +444,9 @@ def kernel_table(parsed: dict[str, dict[str, str]]) -> list[dict]:
 
 def kernels_from_ncu(csv_text: str) -> list[dict]:
     """Raw NCU CSV -> per-kernel table (``kernel_table``); [] on empty input."""
+    if "FORGE_PPU_ACU_CSV" in csv_text or "ppu__time_duration.sum" in csv_text:
+        from forgekernel.inner.acu import kernels_from_acu
+        return kernels_from_acu(csv_text)
     return kernel_table(parse_ncu_csv(csv_text))
 
 
@@ -468,6 +474,18 @@ def render_ncu_trace(records) -> str:
     for row in trace:
         cells = [str(row.get(c, "")) for c in cols]
         lines.append(f"| {row['iter']} | {row['decision_id']} | " + " | ".join(cells) + " |")
+    if any(row.get("backend") == "acu" for row in trace):
+        lines += ["", "Native ACU readings (per launch; original names and units):",
+                  "| iter | kernel | launch | metric | value | unit |",
+                  "|---|---|---|---|---|---|"]
+        def cell(value):
+            return str(value).replace("|", r"\|").replace("\n", " ")
+        for row in trace:
+            for metric, readings in (row.get("ppu_metrics") or {}).items():
+                for reading in readings:
+                    lines.append("| " + " | ".join(map(cell, (
+                        row["iter"], row.get("kernel", ""), reading["launch_id"],
+                        metric, reading["raw"], reading["unit"]))) + " |")
     return "\n".join(lines)
 
 
@@ -560,6 +578,8 @@ def summarize_metrics(m: dict, baseline: dict | None = None) -> dict:
     the ratio-based wavefront-volume flag — a volume tax has no absolute "too
     high", only "N x what the reference pays for the same data".
     """
+    if m.get("backend") == "acu":
+        return {"flags": [], "verdict": "ACU: interpret ppu_metrics using the recorded native names, units and target definitions"}
     flags = []
     for key, kind, severe, elevated in _THRESHOLDS:
         if key not in m or m[key] is None:

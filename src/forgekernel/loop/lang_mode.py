@@ -1,4 +1,4 @@
-"""Language modes: the CuTe DSL mode and the CUDA mode, kept apart.
+"""Language modes: CuTe DSL, CUDA C++ and native PPU C++.
 
 A loop ``language`` (loop.toml ``[loop].language`` / ``forge loop --language``)
 used to steer one thing only -- the ``{LANGUAGE}`` token in the student and
@@ -10,9 +10,9 @@ language ``cuda-sol``) then read DSL recipes, was told to keep a Python
 outran its kernel.
 
 This module is the one place that says which MODE a language belongs to and
-what each mode reads, so the two modes stay independent:
+what each mode reads, so the modes stay independent:
 
-- the **cutedsl mode** (every language that is not a CUDA mode language) reads
+- the **cutedsl mode** (the default for other language names) reads
   ``meta/<prompt>``, ``hw_kb/cutedsl/<arch>/``,
   ``docs/kb-provenance/``. Nothing here changes a byte of its path.
 - the **cuda mode** (``CUDA_LANGUAGES``) reads its own prompt set
@@ -21,6 +21,8 @@ what each mode reads, so the two modes stay independent:
   provenance under ``docs/kb-provenance/cuda/``. Its tools key on the kernel
   file's suffix (``.cu``), which ``language_problem`` keeps in step with the
   language.
+- the **ppu mode** reads meta/ppu prompts, hw_kb/ppu and its own provenance.
+  It uses native HGCC/ACU; NVIDIA binary instruments are not applied.
 """
 from __future__ import annotations
 
@@ -28,6 +30,7 @@ from pathlib import Path
 
 MODE_CUTEDSL = "cutedsl"
 MODE_CUDA = "cuda"
+MODE_PPU = "ppu"
 
 # The languages whose student writes a CUDA C++ kernel file the card builds with
 # nvcc. cuda-sol is the leaderboard cuda_cpp solution (one .cu with its own
@@ -36,19 +39,25 @@ MODE_CUDA = "cuda"
 CUDA_LANGUAGES = frozenset({"cuda-sol"})
 CUDA_KERNEL_SUFFIXES = (".cu",)
 
-KB_ROOT = {MODE_CUTEDSL: "hw_kb/cutedsl", MODE_CUDA: "hw_kb/cuda"}
+KB_ROOT = {MODE_CUTEDSL: "hw_kb/cutedsl", MODE_CUDA: "hw_kb/cuda", MODE_PPU: "hw_kb/ppu"}
 # Under the shared docs/kb-provenance/ root, so every "startswith docs/kb-provenance/"
 # listing (harvest leftovers, publish) still covers it, while an entry name the two
 # KBs share (gpu_probe_ladder, ...) keeps one provenance file per KB.
-PROVENANCE_SUBDIR = {MODE_CUTEDSL: "", MODE_CUDA: "cuda"}
-PROMPT_OVERLAY_DIR = {MODE_CUTEDSL: None, MODE_CUDA: "cuda"}
+PROVENANCE_SUBDIR = {MODE_CUTEDSL: "", MODE_CUDA: "cuda", MODE_PPU: "ppu"}
+PROMPT_OVERLAY_DIR = {MODE_CUTEDSL: None, MODE_CUDA: "cuda", MODE_PPU: "ppu"}
 
 DEFAULT_CUDA_LANGUAGE = "cuda-sol"
 
 
 def mode_of(language: str | None) -> str:
-    """The mode a loop language belongs to (anything not CUDA is the DSL mode)."""
+    """The mode a loop language belongs to; unknown names retain the DSL default."""
+    if language == MODE_PPU:
+        return MODE_PPU
     return MODE_CUDA if language in CUDA_LANGUAGES else MODE_CUTEDSL
+
+
+def is_ppu(language: str | None) -> bool:
+    return mode_of(language) == MODE_PPU
 
 
 def is_cuda(language: str | None) -> bool:
@@ -80,8 +89,11 @@ def owns_provenance(rel_path: str, language: str | None) -> bool:
     """Whether a repo-relative ``docs/kb-provenance/...`` path belongs to the
     language's mode: the CUDA mode owns ``docs/kb-provenance/cuda/``, the DSL mode
     everything else under the root (the shared per-op ``gaps/`` archive included)."""
-    in_cuda = str(rel_path).startswith(f"docs/kb-provenance/{PROVENANCE_SUBDIR[MODE_CUDA]}/")
-    return in_cuda if is_cuda(language) else not in_cuda
+    mode = mode_of(language)
+    owner = next((m for m in (MODE_CUDA, MODE_PPU)
+                  if str(rel_path).startswith(f"docs/kb-provenance/{PROVENANCE_SUBDIR[m]}/")),
+                 MODE_CUTEDSL)
+    return owner == mode
 
 
 def prompt_path(meta_dir: Path, name: str, language: str | None) -> Path:
@@ -107,6 +119,10 @@ def language_problem(language: str, kernel_file: str | Path) -> str | None:
     The language picks the prompts and the KB, the file picks what the card
     builds; out of step, the student is told to write CuTe DSL into a ``.cu`` (or
     C++ into a ``.py``) and every tool reads the wrong thing."""
+    if is_ppu(language):
+        if Path(kernel_file).suffix not in (".cpp", ".hg", ".cu"):
+            return f"language 'ppu' requires a native C++ kernel (.cpp, .hg or .cu), got {kernel_file!r}"
+        return None
     cu = is_cuda_kernel_file(kernel_file)
     if is_cuda(language) and not cu:
         return (f"language {language!r} is the CUDA mode but the kernel file is "

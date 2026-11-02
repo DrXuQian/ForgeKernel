@@ -3,6 +3,13 @@ Copyright 2026 The ForgeKernel Authors
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 
+The imported PPU knowledge collection has separate inherited documentation
+terms. See skills/ppu-kernel-knowledge/references/notices.md and the complete
+license texts in skills/ppu-kernel-knowledge/licenses/. PPU query source and
+profiling/numerical-debug material retain their Apache-2.0 notices; other
+imported KDA documentation retains CC-BY-4.0. Workflow wording and links were
+adapted for ForgeKernel; the historical results are not new device certification.
+
 The leaderboard evaluator (src/forgekernel/card_template/eval/leaderboard.py) contains
 code adapted from the following projects, both licensed under the Apache License,
 Version 2.0. The adapted parts are the input generators and the reproduction of each

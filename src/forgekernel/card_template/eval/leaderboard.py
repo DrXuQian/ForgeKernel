@@ -568,8 +568,9 @@ def kernel_fence(problem: dict) -> str | None:
     card = Path(problem["_dir"]).parent.parent
     kfile = problem.get("kernel_file", "kernel.py")
     src = (card / kfile).read_text()
-    cuda = Path(kfile).suffix in CUDA_KERNEL_SUFFIXES
-    if cuda:
+    ppu = isinstance(problem.get("ppu"), dict)
+    cuda = Path(kfile).suffix in CUDA_KERNEL_SUFFIXES or ppu
+    if cuda and not ppu:
         try:
             cuda_kernel_flags(src)
         except ValueError as e:
@@ -581,6 +582,9 @@ def kernel_fence(problem: dict) -> str | None:
         + ([re.escape(ref["key_env"])] if ref.get("key_env") else []) \
         + [r"(^|[^A-Za-z0-9_])" + re.escape(n) + r"([^A-Za-z0-9_]|$)"
            for n in ref.get("deny_modules") or []]   # the reference's installed package
+    if ppu:
+        pats += [r"\bhggc(?:Module|Library|Kernel)\w*", r"hggcGetFuncBySymbol",
+                 r"\bhgobjdump\b", r"\bPPU_SDK\b"]
     m = re.search("|".join(pats), code, re.M)
     what = "binary reference or compiled-code tooling" if kind == "binary" else \
         "reference, its loader, its key or the JIT's caches"
@@ -1019,6 +1023,9 @@ def _impl(problem: dict, which: str):
     card = Path(problem["_dir"]).parent.parent
     if which == "kernel":
         kpath = card / problem.get("kernel_file", "kernel.py")
+        if isinstance(problem.get("ppu"), dict):
+            from ppu_loader import load_ppu_entry
+            return load_ppu_entry(kpath, problem.get("entry", "run"), problem["ppu"]), bool(problem.get("dps", True))
         load = load_cuda_entry if kpath.suffix in CUDA_KERNEL_SUFFIXES else load_entry
         return load(kpath, problem.get("entry", "run")), bool(problem.get("dps", True))
     ref = problem.get("reference_impl") or {"kind": "definition"}
@@ -2581,7 +2588,7 @@ def run_leaderboard_bench(argv=None, problem_path=None) -> int:
     try:
         impl, dps = (ref_fn, ref_dps) if args.impl == "ref" else _impl(problem, "kernel")
     except Exception as e:  # noqa: BLE001
-        if Path(problem.get("kernel_file", "kernel.py")).suffix not in CUDA_KERNEL_SUFFIXES:
+        if not problem.get("ppu") and Path(problem.get("kernel_file", "kernel.py")).suffix not in CUDA_KERNEL_SUFFIXES:
             raise
         why = f"{type(e).__name__}: {e}"
         print(f"[leaderboard] correctness: COMPILE_ERROR — {why[-6000:]}")

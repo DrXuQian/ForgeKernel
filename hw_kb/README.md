@@ -13,9 +13,13 @@ hw_kb/
     README.md
     TEMPLATE.md
     sm100/
+  ppu/               # native HGCC C++ runs (task language "ppu")
+    README.md
+    TEMPLATE.md
+    ppu10/  ppu15/   # admission indexes; no target-certified recipes shipped yet
 ```
 
 A run reads and writes exactly one tree, `hw_kb/<language>/<arch>/`, picked by the task's `language`
-and `arch` (`src/forgekernel/loop/lang_mode.py`). The two language trees are independent: a reading
+and `arch` (`src/forgekernel/loop/lang_mode.py`). The language trees are independent: a reading
 certified with one language's probe is not carried over to the other. See each tree's README for
 the rules.

@@ -83,7 +83,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
@@ -983,6 +983,14 @@ def task_text(*, op: str, op_dir: Path, ws: Path, kernel_file: str, language: st
                  f"preferably {language} (this run's student writes in it, and a reference in "
                  "the same language is easiest for the teacher to distill); other forms the "
                  "evaluator accepts (Triton, inline PTX, ...) are fine too")
+    if lang_mode.is_ppu(language):
+        lang_line = (f"native PPU C++ in {kernel_file}, built by the frozen HGCC adapter. "
+                     "Read the PPU knowledge/profiling packs before the first candidate; "
+                     "record source sections, target applicability and a falsifying experiment. "
+                     "Inspect the installed SDK and actual device. Do not assume NVIDIA "
+                     "PTX, SASS, warp or tensor-instruction semantics. Use ACU/native ISA "
+                     "probes through the existing exec channel. Keep historical evidence "
+                     "separate from this run's device measurements")
     ev = command("eval", str(ws))
     ex = command("exec", str(ws), "--", "<shell command>")
     st = command("status", str(ws.parent))
@@ -1229,8 +1237,10 @@ def _run_session(g: Generation, state: dict, svc: Service, ws: Path, task: str) 
             return
         prompt = task
         if g.policy is not None:
-            g.policy.install("student", ws)
-            prompt = g.policy.notice("student") + task
+            from forgekernel.loop import lang_mode
+            policy = replace(g.policy, ppu_bootstrap_history=lang_mode.is_ppu(g.language))
+            policy.install("student", ws)
+            prompt = policy.notice("student") + task
         remaining = int(deadline - now)
         leg_end = deadline + g.report_s
         env = dict(os.environ)

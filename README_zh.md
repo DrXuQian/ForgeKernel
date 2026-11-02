@@ -63,6 +63,10 @@ ForgeKernel 属于 **Forge 家族**，同一家族的项目还有
 
 ## 快速开始
 
+**PPU：**通过 `forge init <op> --ppu --arch ppu10|ppu15` 创建原生 HGCC 任务，
+使用 ACU 和仓库内的 PPU 经验包。先看 [PPU 配置与工作流](docs/ppu.md)；
+下面的安装步骤针对 NVIDIA。810/890 的实际编译、精度与性能仍需目标机验证。
+
 **环境要求。** 运行 `forge` 的机器：Linux 或 macOS、Python ≥ 3.11、git，以及
 [Claude Code](https://docs.claude.com/en/docs/claude-code/overview) CLI（已登录，或设置
 `ANTHROPIC_API_KEY`）；任务没有参照时还需要 tmux。GPU 机器（同一台或一台 ssh 主机）：NVIDIA
